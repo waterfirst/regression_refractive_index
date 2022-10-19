@@ -1,0 +1,186 @@
+library(tidyverse)
+library(dplyr)
+library(caret)
+library(ModelMetrics)
+library(randomForest)
+library(stringr)
+library(xgboost)  # for fitting GBMs
+library(ranger)   # for fitting random forests
+library(rpart) 
+library(patchwork)
+library(DataExplorer)
+
+rm(list=ls())
+
+getwd()
+
+setwd("D:/Non_Documents/AI/R/data")
+dir()
+
+
+df <- read.csv("refractive_index.csv", stringsAsFactors=T)
+head(df)
+str(df)
+summary(df)
+df <- df[,-1]
+
+## 데이터 대강 보기
+
+pairs(df) ## 간단히 상관관계 보기
+
+
+library(WVPlots)
+PairPlot(df, colnames(df)[1:14], title = "refractive_index",
+         group_var = NULL, palette="Dark2",point_color = "darkgray") 
+
+############### GGally 패키지를 이용한 EDA  ##############################
+
+library(GGally)
+
+#create pairs plot
+ggpairs(df)
+
+
+## 훈련/검증 데이터 나누기
+
+idx <- createDataPartition(df$REFIDX_R, p=0.7, list=F)
+train <- df[idx,]
+test <- df[-idx,]
+head(train)
+
+# na 가 있는 열 확인하기
+colSums(is.na(train))
+colSums(is.na(test)) 
+
+train_r <- train %>% select(-c(1,2,4,5))
+train_g <- train %>% select(-c(1,2,3,5))
+train_b <- train %>% select(-c(1,2,3,4))
+
+
+test_r <- test %>% select(-c(1,2,4,5))
+test_g <- test %>% select(-c(1,2,3,5))
+test_b <- test %>% select(-c(1,2,3,4))
+
+
+
+
+#모델 만들기
+str(train_r)
+
+m1<-train(REFIDX_R~., data=train_r, method="glm") #로지스틱 회귀 모델
+m2<-randomForest(REFIDX_R~., data=train_r, ntree=100) #랜덤포레스트 모델
+
+# Fit a single regression tree
+tree <- rpart(REFIDX_R ~ ., data = train_r)
+
+# Fit a random forest
+set.seed(101)
+rfo <- ranger(REFIDX_R ~ ., data = train_r, importance = "impurity")
+
+# Fit a GBM
+set.seed(102)
+bst <- xgboost(
+  data = data.matrix(subset(train_r, select = -REFIDX_R)),
+  label = train_r$REFIDX_R, 
+  objective = "reg:linear",
+  nrounds = 100, 
+  max_depth = 5, 
+  eta = 0.3,
+  verbose = 0  # suppress printing
+)
+
+
+
+# VI plot for single regression tree
+vi_tree <- tree$variable.importance
+barplot(vi_tree, horiz = TRUE, las = 1)
+
+# VI plot for RF
+vi_rfo <- rfo$variable.importance %>% sort()
+barplot(vi_rfo, horiz = TRUE, las = 1)
+
+# VI plot for GMB
+library(Ckmeans.1d.dp)
+vi_bst <- xgb.importance(model = bst)
+xgb.ggplot.importance(vi_bst)
+
+library(vip)
+i1 <- vip(m1) + ggtitle("Logistic regression")
+i2 <- vip(m2)+ ggtitle("Random Forest")
+i3 <- vip(tree)+ ggtitle("Descision tree")
+i4 <- vip(rfo)+ggtitle("Fast Random Forest")
+i5 <- vip(bst)+ggtitle("XGBoost")
+
+i3+i1+i5+i2+i4
+
+
+#예측하기
+
+p1<-predict(m1, test_r)
+p2<-predict(m2, test_r)
+p3<-predict(tree, test_r)
+p4<- predict(rfo, data = test_r, predict.all = TRUE)
+p4 <- p4$predictions[,2]
+
+p5<-predict(bst, data.matrix(test_r[,-1]))
+
+
+#평가하기
+
+r1 <- caret::R2(test_r$REFIDX_R, p1) #로지스틱 회귀분석
+r2 <- caret::R2(test_r$REFIDX_R, p2) #랜덤포레스트
+r3 <- caret::R2(test_r$REFIDX_R, p3) #의사결정나무
+r4 <- caret::R2(test_r$REFIDX_R, p4) #ranger
+r5 <- caret::R2(test_r$REFIDX_R, p5) #xgboost
+
+name <- c("Logistic regression", "Random Forest", "Descision tree", "Fast Random Forest","XGBoost")
+r_squre <- round(c(r1,r2,r3,r4,r4),2)
+v <- as.data.frame(cbind(name, r_squre) )
+
+v %>% 
+  mutate(name = fct_reorder(name,desc(r_squre))) %>% 
+  ggplot(aes(name, r_squre, fill=name))+geom_col() + 
+  geom_text(data = v, aes(label = paste("R2=",r_squre)), y = r_squre, size=5)+
+  ggtitle("Refractive index prediction of various molucules")+
+  labs(y="R^2", x="M/L Models",subtitle="data by Yoo Pro")+
+  theme_bw()+
+  theme(axis.text.y = element_text(size=12), 
+        axis.text.x = element_text(size=12))+
+  theme(legend.position="none")
+
+## 최종 랜덤포레스트 모델로 최종 모델링 하기
+
+
+m<-randomForest(REFIDX_R~., data=train_r, ntree=100)
+
+p<-predict(m, test_r)
+
+############ Importance 시각화  ################
+
+varImpPlot(m, main="varImpPlot of iris")
+
+library(vip)
+
+vi(m) 
+vip(m)
+
+m.importance(model=m)
+m.ggplot.importance(vi_bst)
+
+library(pdp)
+
+#데이터 제출
+
+## p값을 문자열로 바꾸고 csv 파일로 제출하기
+
+p<-as.character(p)
+submission$value <- p
+
+write.csv(submission, "submission.csv", row.names=F)
+plot(submission)
+
+## 제출된 값 다시 한번 확인하기
+
+abc<-read.csv("submission.csv")
+
+head(abc)
